@@ -1,32 +1,37 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import re
 import os
-
-# Импортируем модель Log
+from sqlalchemy import inspect
+from db_connector import DatabaseConnector
 from log_model import Log, Base
+
+# Функция для извлечения даты из сообщения
+def extract_date_from_message(message):
+    """Извлекает дату в формате 'MMM DD YYYY' (например, 'Jan 16 2025') из сообщения."""
+    date_pattern = r'([A-Za-z]{3} \d{1,2} \d{4})'
+    match = re.search(date_pattern, message)
+    if match:
+        date_str = match.group(1)
+        try:
+            return datetime.strptime(date_str, "%b %d %Y")
+        except ValueError:
+            return None
+    return None
 
 # Функция для парсинга строки лога
 def parse_log_line(line):
     """Парсит строку лога, разделенную пробелами, и возвращает словарь с данными."""
-    # Регулярное выражение для строк вида: "06-40-58.142    fadapt-mavlink  System  INFO    execute shell..."
     pattern = r'(\d{2}-\d{2}-\d{2}\.\d{3})\s+([\w-]+)\s+(\w+)\s+(\w+)\s+(.+)'
     match = re.match(pattern, line.strip())
     if match:
         timestamp_str, process_name, subsystem, log_level, message = match.groups()
         try:
-            # Извлекаем дату из сообщения, если она есть
-            date_pattern = r'([A-Za-z]{3} \d{1,2} \d{4})'
-            date_match = re.search(date_pattern, message)
-            if date_match:
-                date_str = date_match.group(1)
-                # Комбинируем дату из сообщения и время из строки
-                timestamp = datetime.strptime(f"{date_str} {timestamp_str.replace('-', ':')}", "%b %d %Y %H:%M:%S.%f")
+            time_part = timestamp_str.replace('-', ':')
+            date_from_message = extract_date_from_message(message)
+            if date_from_message:
+                timestamp = datetime.strptime(f"{date_from_message.date()} {time_part}", "%Y-%m-%d %H:%M:%S.%f")
             else:
-                # Если даты нет, используем текущую дату
-                timestamp = datetime.strptime(f"{datetime.now().date()} {timestamp_str.replace('-', ':')}", "%Y-%m-%d %H:%M:%S.%f")
-            
+                timestamp = datetime.strptime(f"{datetime.now().date()} {time_part}", "%Y-%m-%d %H:%M:%S.%f")
             return {
                 'timestamp': timestamp,
                 'process_name': process_name,
@@ -42,13 +47,19 @@ def parse_log_line(line):
         return None
 
 # Функция для обработки файлов и вставки данных
-def insert_logs_from_files(directory, engine, batch_size=1000):
-    """Обрабатывает лог-файлы в директории и вставляет данные в базу."""
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    
+def insert_logs_from_files(directory, db_connector, batch_size=1000):
+    """Обрабатывает лог-файлы в директории и вставляет данные в базу PostgreSQL."""
+    session = db_connector.get_session()
     total_inserted = 0
     try:
+        # Проверяем, существует ли таблица
+        inspector = inspect(db_connector.connect())
+        if inspector.has_table('logs'):
+            print("Table 'logs' exists and is ready for insertion.")
+        else:
+            print("Table 'logs' does not exist! Creating it now...")
+            Base.metadata.create_all(db_connector.connect())
+        
         print(f"Scanning directory: {directory}")
         files = [f for f in os.listdir(directory) if f.endswith('.txt')]
         print(f"Files found: {files}")
@@ -59,7 +70,7 @@ def insert_logs_from_files(directory, engine, batch_size=1000):
             
             with open(file_path, 'r', encoding='utf-8') as file:
                 lines = file.readlines()
-                print ("diede(filename) contains {len(lines)} lines")
+                print(f"File {filename} contains {len(lines)} lines")
                 for line in lines:
                     parsed_log = parse_log_line(line)
                     if parsed_log:
@@ -86,8 +97,17 @@ def insert_logs_from_files(directory, engine, batch_size=1000):
 
 # Основной блок
 if __name__ == "__main__":
-    engine = create_engine('sqlite:///logs.db', echo=True)
+    # Настройка коннектора к PostgreSQL
+    connection_string = 'postgresql://postgres:your_password@localhost:5432/logs'  # Укажите вашу строку подключения
+    db_connector = DatabaseConnector(connection_string)
+    
+    # Подключаемся и создаем таблицы
+    engine = db_connector.connect()
     Base.metadata.create_all(engine)
     
+    # Путь к директории с лог-файлами
     log_directory = "/home/lazarus/sys"  # Укажите правильный путь
-    insert_logs_from_files(log_directory, engine)
+    insert_logs_from_files(log_directory, db_connector)
+    
+    # Отключаемся от базы данных
+    db_connector.disconnect()
